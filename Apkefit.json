@@ -1,3 +1,75 @@
 {
-  "ui": 5
+  "update": false,
+  "updateInfo": {
+    "title": "New Version Available!",
+    "message": "A new version of Catbox Uploader is available. You must update to continue.",
+    "link": "https://example.com/new-uploader.html"
+  },
+  "uiStyles": [
+    {
+      "name": "Blue Theme",
+      "bodyClass": "ui1",
+      "colors": {
+        "bg": "#0b1220",
+        "card": "#111b2e",
+        "border": "#3b82f6",
+        "text": "#e5e7eb",
+        "accent": "#3b82f6",
+        "accentDark": "#2563eb",
+        "error": "#ff5555"
+      }
+    },
+    {
+      "name": "Green Theme",
+      "bodyClass": "ui2",
+      "colors": {
+        "bg": "#0f0f0f",
+        "card": "#1b1b1b",
+        "border": "#22c55e",
+        "text": "#e5ffe5",
+        "accent": "#22c55e",
+        "accentDark": "#16a34a",
+        "error": "#ff4444"
+      }
+    },
+    {
+      "name": "Light Theme",
+      "bodyClass": "ui3",
+      "colors": {
+        "bg": "#f4f7fb",
+        "card": "#e6f6fb",
+        "border": "#9ccbd8",
+        "text": "#222222",
+        "accent": "#4aa3b8",
+        "accentDark": "#3b82b8",
+        "error": "#ff5555"
+      }
+    }
+  ],
+  "posts": [
+    {
+      "img": "https://i.ibb.co/0Y0G7Zv/post1.png",
+      "link": "https://example.com/link1"
+    },
+    {
+      "img": "https://i.ibb.co/7t6Sxkj/post2.png",
+      "link": "https://example.com/link2"
+    },
+    {
+      "img": "https://i.ibb.co/Hg1xT3R/post3.png",
+      "link": "https://example.com/link3"
+    },
+    {
+      "img": "https://i.ibb.co/4V5Sx2K/post4.png",
+      "link": "https://example.com/link4"
+    },
+    {
+      "img": "https://i.ibb.co/2d6M1Zr/post5.png",
+      "link": "https://example.com/link5"
+    },
+    {
+      "img": "https://i.ibb.co/XyD3pVZ/post6.png",
+      "link": "https://example.com/link6"
+    }
+  ]
 }
