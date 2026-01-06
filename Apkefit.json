@@ -1,35 +1,3 @@
 {
-  "app": {
-    "title": "Catbox Clone"
-  },
-
-  "theme": {
-    "background": "#0b1220",
-    "topbar": "#020617",
-    "text": "#ffffff",
-    "extra_css": "
-      .card:hover{transform:scale(1.02)}
-      .menu-item:hover{background:#1f2937}
-    "
-  },
-
-  "home": {
-    "upload_text": "Select or Drop Files",
-    "card_bg": "#020617",
-    "card_border": "2px dashed #3b82f6",
-    "demo_link": "https://files.catbox.moe/demo.jpg"
-  },
-
-  "menu": {
-    "bg": "#020617",
-    "items": [
-      { "title": "Home", "icon": "🏠", "action": "home", "color": "#fff" },
-      { "title": "History", "icon": "🕘", "action": "history", "color": "#fff" },
-      { "title": "Clear", "icon": "🗑️", "action": "clear", "color": "#f87171" }
-    ]
-  },
-
-  "effects": {
-    "vibration": 40
-  }
+  "ui": 5
 }
