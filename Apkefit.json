@@ -1,5 +1,5 @@
 {
-  "update": false,
+  "update": true,
   "updateInfo": {
     "title": "New Version Available!",
     "message": "A new version of Catbox Uploader is available. You must update to continue.",
