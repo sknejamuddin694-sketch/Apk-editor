@@ -1,185 +1,170 @@
 #!/usr/bin/env python3
-import os
-import asyncio
-import threading
-from flask import Flask, request, render_template_string, redirect
-from telethon import TelegramClient, events
+import os, asyncio
+from flask import Flask, request, render_template_string
+from telethon import TelegramClient, errors, events
 import openai
 
-# ================= BASIC CONFIG =================
-BASE_DIR = "kaalix_data"
-SESS_DIR = f"{BASE_DIR}/sessions"
+PORT = int(os.environ.get("PORT", 8080))
+SESS_DIR = "sessions"
 os.makedirs(SESS_DIR, exist_ok=True)
 
-PORT = int(os.environ.get("PORT", 8080))
+app = Flask(__name__)
 
-accounts = {}   # phone -> info
-clients = {}    # phone -> TelegramClient
-openai.api_key = ""
+STATE = {
+    "step": 0,
+    "api_id": "",
+    "api_hash": "",
+    "phone": "",
+    "client": None,
+    "logged": False,
+    "ai_key": ""
+}
 
-# ================= HTML PANEL =================
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>KAALIX CONTROL PANEL</title>
+<title>KAALIX PANEL</title>
 <style>
-body{background:#0b0e14;color:#eaeaea;font-family:Arial}
+body{background:#0b0e14;color:#eee;font-family:Arial}
 .box{background:#111;padding:20px;margin:20px;border-radius:10px}
-input,textarea,button{width:100%;padding:8px;margin:6px 0}
+input,textarea,button{width:100%;padding:10px;margin:5px 0}
 button{background:#4caf50;border:none;font-weight:bold}
-.stop{background:#f44336}
-pre{background:#000;padding:10px;white-space:pre-wrap}
-small{color:#aaa}
+pre{background:#000;padding:10px}
 </style>
 </head>
 <body>
 
 <div class="box">
-<h2>🔑 OpenAI API Key</h2>
-<form method="post" action="/set_ai">
-<input name="key" placeholder="sk-xxxxxxxxxxxxxxxx" required>
-<button>Save Key</button>
-</form>
-<small>Key server memory me rahegi, file me save nahi hogi</small>
-</div>
-
-<div class="box">
-<h2>➕ Add Telegram Account (Send OTP)</h2>
-<form method="post" action="/send_otp">
+<h2>➕ Add Account</h2>
+<form method="post">
+{% if step == 0 %}
 <input name="api_id" placeholder="API ID" required>
+<button>Next</button>
+
+{% elif step == 1 %}
 <input name="api_hash" placeholder="API HASH" required>
+<button>Next</button>
+
+{% elif step == 2 %}
 <input name="phone" placeholder="+91xxxxxxxxxx" required>
 <button>Send OTP</button>
-</form>
-</div>
 
-<div class="box">
-<h2>📲 Verify OTP</h2>
-<form method="post" action="/verify_otp">
-<input name="phone" placeholder="+91xxxxxxxxxx" required>
+{% elif step == 3 %}
 <input name="otp" placeholder="OTP Code" required>
-<button>Verify & Login</button>
+<button>Verify OTP</button>
+
+{% elif step == 4 %}
+<input name="password" placeholder="2FA Password (if any)">
+<button>Verify Password</button>
+
+{% elif step == 5 %}
+<input name="ai_key" placeholder="OpenAI API Key (sk-...)" required>
+<button>Finish Login</button>
+{% endif %}
 </form>
+
+<p>Current Step: {{step}}</p>
 </div>
 
+{% if logged %}
 <div class="box">
-<h2>👤 Accounts</h2>
-{% for p,a in accounts.items() %}
-<b>{{p}}</b> — {{a["status"]}}
-<form method="post" action="/start">
-<input type="hidden" name="phone" value="{{p}}">
-<button>Start Userbot</button>
-</form>
-<hr>
-{% endfor %}
-</div>
-
-<div class="box">
-<h2>🧠 GPT AI – Command Generator</h2>
+<h2>🧠 AI BOX (Account Connected)</h2>
 <form method="post" action="/ai">
-<textarea name="prompt" placeholder="Example: hi bole toh reply kare"></textarea>
-<button>Generate Code</button>
+<textarea name="prompt" placeholder="command likho..."></textarea>
+<button>Run AI</button>
 </form>
-{% if code %}
-<h3>Generated Code</h3>
-<pre>{{code}}</pre>
+
+{% if result %}
+<pre>{{result}}</pre>
 {% endif %}
 </div>
+{% endif %}
 
 </body>
 </html>
 """
 
-# ================= TELEGRAM FUNCTIONS =================
-async def send_otp(api_id, api_hash, phone):
-    client = TelegramClient(f"{SESS_DIR}/{phone}", api_id, api_hash)
-    await client.connect()
-    await client.send_code_request(phone)
-    accounts[phone] = {
-        "api_id": api_id,
-        "api_hash": api_hash,
-        "client": client,
-        "status": "OTP_SENT"
-    }
+@app.route("/", methods=["GET","POST"])
+def index():
+    global STATE
+    result = None
 
-async def verify_otp(phone, otp):
-    acc = accounts.get(phone)
-    if not acc:
-        return
-    await acc["client"].sign_in(phone, otp)
-    clients[phone] = acc["client"]
-    acc["status"] = "LOGGED_IN"
+    if request.method == "POST":
+        try:
+            if STATE["step"] == 0:
+                STATE["api_id"] = int(request.form["api_id"])
+                STATE["step"] = 1
 
-async def start_userbot(phone):
-    client = clients.get(phone)
-    if not client:
-        return
+            elif STATE["step"] == 1:
+                STATE["api_hash"] = request.form["api_hash"]
+                STATE["step"] = 2
 
-    @client.on(events.NewMessage(pattern="(?i)^hi$"))
-    async def hi_handler(event):
-        await event.reply("Hello 👋 (KAALIX Userbot)")
+            elif STATE["step"] == 2:
+                STATE["phone"] = request.form["phone"]
+                client = TelegramClient(
+                    f"{SESS_DIR}/{STATE['phone']}",
+                    STATE["api_id"],
+                    STATE["api_hash"]
+                )
+                asyncio.run(client.connect())
+                asyncio.run(client.send_code_request(STATE["phone"]))
+                STATE["client"] = client
+                STATE["step"] = 3
 
-    await client.start()
-    accounts[phone]["status"] = "RUNNING"
-    await client.run_until_disconnected()
+            elif STATE["step"] == 3:
+                try:
+                    asyncio.run(
+                        STATE["client"].sign_in(
+                            STATE["phone"],
+                            request.form["otp"]
+                        )
+                    )
+                    STATE["step"] = 5
+                except errors.SessionPasswordNeededError:
+                    STATE["step"] = 4
 
-# ================= FLASK APP =================
-app = Flask(__name__)
+            elif STATE["step"] == 4:
+                asyncio.run(
+                    STATE["client"].sign_in(
+                        password=request.form["password"]
+                    )
+                )
+                STATE["step"] = 5
 
-@app.route("/")
-def home():
-    return render_template_string(HTML, accounts=accounts)
+            elif STATE["step"] == 5:
+                STATE["ai_key"] = request.form["ai_key"]
+                openai.api_key = STATE["ai_key"]
+                STATE["logged"] = True
 
-@app.route("/set_ai", methods=["POST"])
-def set_ai():
-    openai.api_key = request.form["key"].strip()
-    return redirect("/")
+        except Exception as e:
+            result = f"ERROR: {e}"
 
-@app.route("/send_otp", methods=["POST"])
-def sendotp():
-    api_id = int(request.form["api_id"])
-    api_hash = request.form["api_hash"]
-    phone = request.form["phone"]
-    asyncio.run(send_otp(api_id, api_hash, phone))
-    return redirect("/")
-
-@app.route("/verify_otp", methods=["POST"])
-def verifyotp():
-    phone = request.form["phone"]
-    otp = request.form["otp"]
-    asyncio.run(verify_otp(phone, otp))
-    return redirect("/")
-
-@app.route("/start", methods=["POST"])
-def start():
-    phone = request.form["phone"]
-    threading.Thread(
-        target=lambda: asyncio.run(start_userbot(phone)),
-        daemon=True
-    ).start()
-    return redirect("/")
+    return render_template_string(
+        HTML,
+        step=STATE["step"],
+        logged=STATE["logged"],
+        result=result
+    )
 
 @app.route("/ai", methods=["POST"])
 def ai():
     prompt = request.form["prompt"]
-    if not openai.api_key:
-        code = "# ERROR: OpenAI API key set nahi hai"
-    else:
-        try:
-            resp = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You generate safe Telethon userbot commands only."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            code = resp.choices[0].message.content
-        except Exception as e:
-            code = f"# AI ERROR: {e}"
+    try:
+        r = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}]
+        )
+        out = r.choices[0].message.content
+    except Exception as e:
+        out = f"AI ERROR: {e}"
 
-    return render_template_string(HTML, accounts=accounts, code=code)
+    return render_template_string(
+        HTML,
+        step=STATE["step"],
+        logged=True,
+        result=out
+    )
 
-# ================= MAIN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
