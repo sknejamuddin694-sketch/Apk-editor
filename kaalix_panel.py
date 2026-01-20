@@ -1,77 +1,84 @@
 #!/usr/bin/env python3
 import os, asyncio
 from flask import Flask, request, render_template_string
-from telethon import TelegramClient, errors, events
+from telethon import TelegramClient, events, errors
 import openai
 
+# ================= BASIC CONFIG =================
 PORT = int(os.environ.get("PORT", 8080))
 SESS_DIR = "sessions"
 os.makedirs(SESS_DIR, exist_ok=True)
 
-app = Flask(__name__)
-
+# ---------- GLOBAL STATE (single user demo) ----------
 STATE = {
-    "step": 0,
-    "api_id": "",
-    "api_hash": "",
-    "phone": "",
+    "step": "idle",  # idle, api, phone, otp, password, ai, done
+    "api_id": None,
+    "api_hash": None,
+    "phone": None,
     "client": None,
     "logged": False,
-    "ai_key": ""
+    "need_password": False,
+    "ai_key": "",
 }
 
+app = Flask(__name__)
+
+# ================= HTML =================
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>KAALIX PANEL</title>
+<title>KAALIX LOGIN PANEL</title>
 <style>
 body{background:#0b0e14;color:#eee;font-family:Arial}
 .box{background:#111;padding:20px;margin:20px;border-radius:10px}
-input,textarea,button{width:100%;padding:10px;margin:5px 0}
+input,textarea,button{width:100%;padding:10px;margin:6px 0}
 button{background:#4caf50;border:none;font-weight:bold}
-pre{background:#000;padding:10px}
+pre{background:#000;padding:10px;white-space:pre-wrap}
+small{color:#aaa}
 </style>
 </head>
 <body>
 
 <div class="box">
-<h2>➕ Add Account</h2>
-<form method="post">
-{% if step == 0 %}
-<input name="api_id" placeholder="API ID" required>
-<button>Next</button>
+<h2>➕ Add Telegram Account</h2>
 
-{% elif step == 1 %}
+<form method="post">
+{% if step == "idle" %}
+<button name="action" value="start">Start Login</button>
+
+{% elif step == "api" %}
+<input name="api_id" placeholder="API ID" required>
 <input name="api_hash" placeholder="API HASH" required>
 <button>Next</button>
 
-{% elif step == 2 %}
+{% elif step == "phone" %}
 <input name="phone" placeholder="+91xxxxxxxxxx" required>
 <button>Send OTP</button>
+<small>OTP Telegram app me aayega</small>
 
-{% elif step == 3 %}
-<input name="otp" placeholder="OTP Code" required>
+{% elif step == "otp" %}
+<input name="otp" placeholder="Enter OTP" required>
 <button>Verify OTP</button>
 
-{% elif step == 4 %}
-<input name="password" placeholder="2FA Password (if any)">
+{% elif step == "password" %}
+<input name="password" placeholder="2FA Password">
 <button>Verify Password</button>
 
-{% elif step == 5 %}
+{% elif step == "ai" %}
 <input name="ai_key" placeholder="OpenAI API Key (sk-...)" required>
 <button>Finish Login</button>
 {% endif %}
 </form>
 
-<p>Current Step: {{step}}</p>
+<p>Current step: {{step}}</p>
 </div>
 
 {% if logged %}
 <div class="box">
 <h2>🧠 AI BOX (Account Connected)</h2>
 <form method="post" action="/ai">
-<textarea name="prompt" placeholder="command likho..."></textarea>
+<textarea name="prompt" placeholder="AI command likho..."></textarea>
 <button>Run AI</button>
 </form>
 
@@ -85,6 +92,7 @@ pre{background:#000;padding:10px}
 </html>
 """
 
+# ================= ROUTES =================
 @app.route("/", methods=["GET","POST"])
 def index():
     global STATE
@@ -92,15 +100,18 @@ def index():
 
     if request.method == "POST":
         try:
-            if STATE["step"] == 0:
+            # ---------- START ----------
+            if STATE["step"] == "idle":
+                STATE["step"] = "api"
+
+            # ---------- API ----------
+            elif STATE["step"] == "api":
                 STATE["api_id"] = int(request.form["api_id"])
-                STATE["step"] = 1
-
-            elif STATE["step"] == 1:
                 STATE["api_hash"] = request.form["api_hash"]
-                STATE["step"] = 2
+                STATE["step"] = "phone"
 
-            elif STATE["step"] == 2:
+            # ---------- PHONE ----------
+            elif STATE["step"] == "phone":
                 STATE["phone"] = request.form["phone"]
                 client = TelegramClient(
                     f"{SESS_DIR}/{STATE['phone']}",
@@ -110,9 +121,10 @@ def index():
                 asyncio.run(client.connect())
                 asyncio.run(client.send_code_request(STATE["phone"]))
                 STATE["client"] = client
-                STATE["step"] = 3
+                STATE["step"] = "otp"
 
-            elif STATE["step"] == 3:
+            # ---------- OTP ----------
+            elif STATE["step"] == "otp":
                 try:
                     asyncio.run(
                         STATE["client"].sign_in(
@@ -120,22 +132,25 @@ def index():
                             request.form["otp"]
                         )
                     )
-                    STATE["step"] = 5
+                    STATE["step"] = "ai"
                 except errors.SessionPasswordNeededError:
-                    STATE["step"] = 4
+                    STATE["step"] = "password"
 
-            elif STATE["step"] == 4:
+            # ---------- PASSWORD ----------
+            elif STATE["step"] == "password":
                 asyncio.run(
                     STATE["client"].sign_in(
                         password=request.form["password"]
                     )
                 )
-                STATE["step"] = 5
+                STATE["step"] = "ai"
 
-            elif STATE["step"] == 5:
+            # ---------- AI KEY ----------
+            elif STATE["step"] == "ai":
                 STATE["ai_key"] = request.form["ai_key"]
                 openai.api_key = STATE["ai_key"]
                 STATE["logged"] = True
+                STATE["step"] = "done"
 
         except Exception as e:
             result = f"ERROR: {e}"
@@ -161,10 +176,11 @@ def ai():
 
     return render_template_string(
         HTML,
-        step=STATE["step"],
+        step="done",
         logged=True,
         result=out
     )
 
+# ================= MAIN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
