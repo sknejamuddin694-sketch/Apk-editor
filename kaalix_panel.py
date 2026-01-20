@@ -1,186 +1,143 @@
-#!/usr/bin/env python3
-import os, asyncio
-from flask import Flask, request, render_template_string
-from telethon import TelegramClient, events, errors
+# ================== CONFIG (PASTE HERE) ==================
+BOT_TOKEN = "8507388502:AAFN-A33sRl6uqfy--EShYHXtuhisY06Z9k"
+OPENAI_API_KEY = "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"
+# =========================================================
+
+import os
+import threading
+import whisper
 import openai
+from flask import Flask, request, send_file, render_template_string
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_audioclips
 
-# ================= BASIC CONFIG =================
-PORT = int(os.environ.get("PORT", 8080))
-SESS_DIR = "sessions"
-os.makedirs(SESS_DIR, exist_ok=True)
+openai.api_key = OPENAI_API_KEY
 
-# ---------- GLOBAL STATE (single user demo) ----------
-STATE = {
-    "step": "idle",  # idle, api, phone, otp, password, ai, done
-    "api_id": None,
-    "api_hash": None,
-    "phone": None,
-    "client": None,
-    "logged": False,
-    "need_password": False,
-    "ai_key": "",
-}
+WORKDIR = "work"
+os.makedirs(WORKDIR, exist_ok=True)
 
-app = Flask(__name__)
+# ================= LOAD WHISPER =================
+whisper_model = whisper.load_model("base")
 
-# ================= HTML =================
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>KAALIX LOGIN PANEL</title>
-<style>
-body{background:#0b0e14;color:#eee;font-family:Arial}
-.box{background:#111;padding:20px;margin:20px;border-radius:10px}
-input,textarea,button{width:100%;padding:10px;margin:6px 0}
-button{background:#4caf50;border:none;font-weight:bold}
-pre{background:#000;padding:10px;white-space:pre-wrap}
-small{color:#aaa}
-</style>
-</head>
-<body>
+# ================= VOICE DECISION =================
+def decide_voice(jp_text):
+    male_words = ["俺", "僕", "だぞ", "くそ", "だろ"]
+    female_words = ["私", "あたし", "よね", "わ", "かしら"]
 
-<div class="box">
-<h2>➕ Add Telegram Account</h2>
+    for w in male_words:
+        if w in jp_text:
+            return "male"
+    for w in female_words:
+        if w in jp_text:
+            return "female"
+    return "female"  # default
 
-<form method="post">
-{% if step == "idle" %}
-<button name="action" value="start">Start Login</button>
+# ================= CORE PROCESS =================
+def process_video(input_video, output_video):
+    video = VideoFileClip(input_video)
+    jp_audio = f"{WORKDIR}/jp.wav"
+    video.audio.write_audiofile(jp_audio, logger=None)
 
-{% elif step == "api" %}
-<input name="api_id" placeholder="API ID" required>
-<input name="api_hash" placeholder="API HASH" required>
-<button>Next</button>
+    # JP speech -> text with segments
+    result = whisper_model.transcribe(jp_audio, language="ja")
+    segments = result["segments"]
 
-{% elif step == "phone" %}
-<input name="phone" placeholder="+91xxxxxxxxxx" required>
-<button>Send OTP</button>
-<small>OTP Telegram app me aayega</small>
+    hindi_audio_parts = []
 
-{% elif step == "otp" %}
-<input name="otp" placeholder="Enter OTP" required>
-<button>Verify OTP</button>
+    for i, seg in enumerate(segments):
+        jp_line = seg["text"].strip()
+        if not jp_line:
+            continue
 
-{% elif step == "password" %}
-<input name="password" placeholder="2FA Password">
-<button>Verify Password</button>
+        # Translate to Hindi
+        tr = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Translate Japanese anime dialogue into simple spoken Hindi"},
+                {"role": "user", "content": jp_line}
+            ]
+        )
+        hi_text = tr.choices[0].message.content
 
-{% elif step == "ai" %}
-<input name="ai_key" placeholder="OpenAI API Key (sk-...)" required>
-<button>Finish Login</button>
-{% endif %}
+        voice = decide_voice(jp_line)
+
+        # Hindi TTS
+        speech = openai.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice=voice,
+            input=hi_text
+        )
+
+        part_path = f"{WORKDIR}/part_{i}.wav"
+        with open(part_path, "wb") as f:
+            f.write(speech)
+
+        hindi_audio_parts.append(AudioFileClip(part_path))
+
+    if not hindi_audio_parts:
+        raise Exception("No dialogue detected")
+
+    final_audio = concatenate_audioclips(hindi_audio_parts)
+    final_video = video.set_audio(final_audio)
+    final_video.write_videofile(output_video, logger=None)
+
+# ================= TELEGRAM BOT =================
+async def tg_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎬 Video mil gaya\n"
+        "🇯🇵➡️🇮🇳 Japanese → Hindi dub shuru\n"
+        "👨/👩 Auto male-female voice\n"
+        "⏳ Thoda wait..."
+    )
+
+    file = await update.message.video.get_file()
+    inp = f"{WORKDIR}/tg_input.mp4"
+    out = f"{WORKDIR}/tg_output.mp4"
+    await file.download_to_drive(inp)
+
+    t = threading.Thread(target=process_video, args=(inp, out))
+    t.start()
+    t.join()
+
+    await update.message.reply_video(
+        video=open(out, "rb"),
+        caption="✅ Hindi Dub Ready (Auto Male/Female)"
+    )
+
+def start_bot():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.VIDEO, tg_video))
+    print("🤖 Telegram Bot Running")
+    app.run_polling()
+
+# ================= HTML WEB =================
+web = Flask(__name__)
+
+HTML_PAGE = """
+<!doctype html>
+<title>Anime Hindi Dub</title>
+<h2>Upload Anime Clip (Max ~3 min)</h2>
+<p>Auto Male / Female Hindi Voice</p>
+<form method=post enctype=multipart/form-data>
+  <input type=file name=video required>
+  <br><br>
+  <input type=submit value="Dub to Hindi">
 </form>
-
-<p>Current step: {{step}}</p>
-</div>
-
-{% if logged %}
-<div class="box">
-<h2>🧠 AI BOX (Account Connected)</h2>
-<form method="post" action="/ai">
-<textarea name="prompt" placeholder="AI command likho..."></textarea>
-<button>Run AI</button>
-</form>
-
-{% if result %}
-<pre>{{result}}</pre>
-{% endif %}
-</div>
-{% endif %}
-
-</body>
-</html>
 """
 
-# ================= ROUTES =================
-@app.route("/", methods=["GET","POST"])
-def index():
-    global STATE
-    result = None
-
+@web.route("/", methods=["GET", "POST"])
+def upload():
     if request.method == "POST":
-        try:
-            # ---------- START ----------
-            if STATE["step"] == "idle":
-                STATE["step"] = "api"
-
-            # ---------- API ----------
-            elif STATE["step"] == "api":
-                STATE["api_id"] = int(request.form["api_id"])
-                STATE["api_hash"] = request.form["api_hash"]
-                STATE["step"] = "phone"
-
-            # ---------- PHONE ----------
-            elif STATE["step"] == "phone":
-                STATE["phone"] = request.form["phone"]
-                client = TelegramClient(
-                    f"{SESS_DIR}/{STATE['phone']}",
-                    STATE["api_id"],
-                    STATE["api_hash"]
-                )
-                asyncio.run(client.connect())
-                asyncio.run(client.send_code_request(STATE["phone"]))
-                STATE["client"] = client
-                STATE["step"] = "otp"
-
-            # ---------- OTP ----------
-            elif STATE["step"] == "otp":
-                try:
-                    asyncio.run(
-                        STATE["client"].sign_in(
-                            STATE["phone"],
-                            request.form["otp"]
-                        )
-                    )
-                    STATE["step"] = "ai"
-                except errors.SessionPasswordNeededError:
-                    STATE["step"] = "password"
-
-            # ---------- PASSWORD ----------
-            elif STATE["step"] == "password":
-                asyncio.run(
-                    STATE["client"].sign_in(
-                        password=request.form["password"]
-                    )
-                )
-                STATE["step"] = "ai"
-
-            # ---------- AI KEY ----------
-            elif STATE["step"] == "ai":
-                STATE["ai_key"] = request.form["ai_key"]
-                openai.api_key = STATE["ai_key"]
-                STATE["logged"] = True
-                STATE["step"] = "done"
-
-        except Exception as e:
-            result = f"ERROR: {e}"
-
-    return render_template_string(
-        HTML,
-        step=STATE["step"],
-        logged=STATE["logged"],
-        result=result
-    )
-
-@app.route("/ai", methods=["POST"])
-def ai():
-    prompt = request.form["prompt"]
-    try:
-        r = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}]
-        )
-        out = r.choices[0].message.content
-    except Exception as e:
-        out = f"AI ERROR: {e}"
-
-    return render_template_string(
-        HTML,
-        step="done",
-        logged=True,
-        result=out
-    )
+        file = request.files["video"]
+        inp = f"{WORKDIR}/web_input.mp4"
+        out = f"{WORKDIR}/web_output.mp4"
+        file.save(inp)
+        process_video(inp, out)
+        return send_file(out, as_attachment=True)
+    return render_template_string(HTML_PAGE)
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    threading.Thread(target=start_bot).start()
+    web.run(host="0.0.0.0", port=8080)
