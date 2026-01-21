@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-import asyncio, os, random, re, json, subprocess
+import asyncio, os, random, re, json
 from aiohttp import web
 from telethon import TelegramClient, errors
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import ReactionEmoji
-from pytgcalls import PyTgCalls
-from pytgcalls.types.input_stream import AudioPiped
-from pytgcalls.types.input_stream.quality import HighQualityAudio
-import yt_dlp
+from telethon.errors import FloodWaitError, RPCError
 
-# ---------------- CONFIG ----------------
+# ---------------- CONFIG ---------------- #
+
 HOST = "127.0.0.1"
 PORT = 8080
 SESSIONS = "sessions"
 os.makedirs(SESSIONS, exist_ok=True)
 
 clients = {}
-vc_clients = {}
 
-# ---------------------------------------
+# ---------------- UTIL ---------------- #
 
 def parse_link(link):
     try:
@@ -35,128 +31,191 @@ def parse_link(link):
 async def load_sessions():
     for f in os.listdir(SESSIONS):
         if f.endswith(".session"):
-            phone = f.replace(".session","")
-            client = TelegramClient(os.path.join(SESSIONS, phone), 2040, "b18441a1ff76510619e3c197d826dd45")
+            phone = f.replace(".session", "")
+            client = TelegramClient(
+                os.path.join(SESSIONS, phone),
+                2040,
+                "b18441a1ff76510619e3c197d826dd45"
+            )
             await client.connect()
             if await client.is_user_authorized():
                 clients[phone] = client
-                vc_clients[phone] = PyTgCalls(client)
-                await vc_clients[phone].start()
-                print(f"✅ Restored: {phone}")
+                print(f"✅ Session Restored: {phone}")
 
-# ---------------- YT AUDIO ----------------
-def download_audio(url):
-    ydl_opts = {
-        "format": "bestaudio",
-        "outtmpl": "music.%(ext)s",
-        "quiet": True
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    for f in os.listdir():
-        if f.startswith("music."):
-            return f
-    return None
+# ---------------- UI ---------------- #
 
-# ---------------- ROUTES ----------------
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nexus Reaction Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body{margin:0;font-family:sans-serif;background:#0f172a;color:#fff}
+nav{width:80px;position:fixed;height:100vh;background:#020617;display:flex;flex-direction:column;align-items:center;padding-top:20px}
+nav div{margin:20px;cursor:pointer}
+main{margin-left:80px;padding:30px}
+.page{display:none}
+.page.active{display:block}
+input,select,button{width:100%;padding:12px;margin:8px 0;border-radius:8px;border:none}
+button{background:#2563eb;color:white;font-weight:bold}
+.log{background:black;color:#22c55e;height:150px;overflow:auto;padding:10px;font-family:monospace}
+</style>
+</head>
+<body>
 
-async def handle_index(request):
-    return web.Response(text="Panel Running", content_type="text/html")
+<nav>
+<div onclick="show('home',this)">🏠</div>
+<div onclick="show('add',this)">➕</div>
+<div onclick="show('react',this)">❤️</div>
+</nav>
 
-async def handle_status(request):
+<main>
+<div id="home" class="page active">
+<h2>Dashboard</h2>
+<p>Active Accounts: <span id="cnt">0</span></p>
+</div>
+
+<div id="add" class="page">
+<h2>Add Account</h2>
+<input id="api_id" placeholder="API ID">
+<input id="api_hash" placeholder="API HASH">
+<input id="phone" placeholder="+91xxxx">
+<button onclick="sendOTP()">Send OTP</button>
+<input id="otp" placeholder="OTP">
+<input id="pwd" placeholder="2FA Password">
+<button onclick="verify()">Login</button>
+<div id="msg"></div>
+</div>
+
+<div id="react" class="page">
+<h2>Mass Reaction</h2>
+<input id="link" placeholder="https://t.me/...">
+<select id="emoji">
+<option value="❤️">❤️</option>
+<option value="🔥">🔥</option>
+<option value="👍">👍</option>
+<option value="😂">😂</option>
+</select>
+<button onclick="react()">Start</button>
+<div class="log" id="log"></div>
+</div>
+</main>
+
+<script>
+function show(id,el){
+document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+document.getElementById(id).classList.add('active');
+}
+async function status(){
+let r=await fetch('/status');let d=await r.json();
+document.getElementById('cnt').innerText=d.accounts;
+}
+setInterval(status,3000);status();
+
+function log(t){let l=document.getElementById('log');l.innerHTML+="> "+t+"<br>";l.scrollTop=l.scrollHeight;}
+
+async function sendOTP(){
+let r=await fetch('/send_otp',{method:'POST',body:JSON.stringify({
+api_id:api_id.value,api_hash:api_hash.value,phone:phone.value})});
+let d=await r.json();msg.innerText=d.message||d.error;
+}
+async function verify(){
+let r=await fetch('/verify',{method:'POST',body:JSON.stringify({
+phone:phone.value,otp:otp.value,password:pwd.value})});
+let d=await r.json();msg.innerText=d.message||d.error;status();
+}
+async function react(){
+log("Starting...");
+let r=await fetch('/react',{method:'POST',body:JSON.stringify({
+link:link.value,emoji:emoji.value})});
+let d=await r.json();log(d.message||d.error);
+}
+</script>
+</body>
+</html>
+"""
+
+# ---------------- ROUTES ---------------- #
+
+async def index(request):
+    return web.Response(text=HTML_TEMPLATE, content_type="text/html")
+
+async def status(request):
     return web.json_response({"accounts": len(clients)})
 
-async def handle_send_otp(request):
-    data = await request.json()
-    phone = data['phone'].replace("+","")
-    client = TelegramClient(os.path.join(SESSIONS, phone), int(data['api_id']), data['api_hash'])
-    await client.connect()
-    await client.send_code_request(data['phone'])
-    clients[phone] = client
-    vc_clients[phone] = PyTgCalls(client)
-    await vc_clients[phone].start()
-    return web.json_response({"message": "OTP Sent"})
-
-async def handle_verify(request):
-    data = await request.json()
-    client = clients.get(data['phone'].replace("+",""))
+async def send_otp(request):
     try:
-        await client.sign_in(data['phone'], data['otp'])
-    except errors.SessionPasswordNeededError:
-        await client.sign_in(password=data['password'])
-    return web.json_response({"message": "Login Success"})
+        d = await request.json()
+        phone = d["phone"].replace("+","")
+        client = TelegramClient(
+            os.path.join(SESSIONS, phone),
+            int(d["api_id"]),
+            d["api_hash"]
+        )
+        await client.connect()
+        await client.send_code_request(d["phone"])
+        clients[d["phone"]] = client
+        return web.json_response({"message": "OTP Sent"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
 
-# ---------- FIXED MASS REACTION ----------
-async def handle_react(request):
-    data = await request.json()
-    peer, msg_id = parse_link(data['link'])
+async def verify(request):
+    try:
+        d = await request.json()
+        client = clients[d["phone"]]
+        try:
+            await client.sign_in(d["phone"], d["otp"])
+        except errors.SessionPasswordNeededError:
+            await client.sign_in(password=d["password"])
+        return web.json_response({"message": "Account Connected"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+# ---------------- FIXED REACTION ---------------- #
+
+async def react_handler(request):
+    d = await request.json()
+    peer, msg_id = parse_link(d["link"])
     if not peer:
         return web.json_response({"error": "Invalid link"}, status=400)
 
-    success = 0
-
-    for phone, client in clients.items():
+    ok = 0
+    for phone, client in list(clients.items()):
         try:
-            if not client.is_connected():
-                await client.connect()
+            if not await client.is_user_authorized():
+                continue
 
-            entity = await client.get_entity(peer)
-
-            try:
-                await client(JoinChannelRequest(entity))
-            except:
-                pass
-
-            await client(SendReactionRequest(
-                peer=entity,
-                msg_id=msg_id,
-                reaction=[ReactionEmoji(emoticon=data['emoji'])]
-            ))
-
-            success += 1
-            await asyncio.sleep(random.uniform(1,2))
-
-        except errors.FloodWaitError as e:
-            await asyncio.sleep(e.seconds)
-        except Exception as e:
-            print("Reaction error:", e)
-
-    return web.json_response({"message": f"Reaction done by {success} accounts"})
-
-# ---------- VC JOIN + MUSIC ----------
-async def handle_play(request):
-    data = await request.json()
-    chat = data['chat']
-    url = data['url']
-
-    audio = download_audio(url)
-    if not audio:
-        return web.json_response({"error": "Download failed"}, status=400)
-
-    joined = 0
-    for phone, vc in vc_clients.items():
-        try:
-            await vc.join_group_call(
-                chat,
-                AudioPiped(audio, HighQualityAudio())
+            entity = await client.get_input_entity(peer)
+            await client(
+                SendReactionRequest(
+                    peer=entity,
+                    msg_id=msg_id,
+                    reaction=[ReactionEmoji(emoticon=d["emoji"])]
+                )
             )
-            joined += 1
-            break
-        except Exception as e:
-            print("VC error:", e)
+            ok += 1
+            await asyncio.sleep(random.uniform(1.2, 2.0))
 
-    return web.json_response({"message": f"Music playing in VC ({joined} client)"})
+        except FloodWaitError as e:
+            await asyncio.sleep(e.seconds + 1)
+        except RPCError:
+            continue
+        except Exception:
+            continue
 
-# ---------------- SERVER ----------------
+    return web.json_response({"message": f"✅ Reacted with {ok} accounts"})
+
+# ---------------- START ---------------- #
+
 app = web.Application()
-app.router.add_get('/', handle_index)
-app.router.add_get('/status', handle_status)
-app.router.add_post('/send_otp', handle_send_otp)
-app.router.add_post('/verify', handle_verify)
-app.router.add_post('/react', handle_react)
-app.router.add_post('/play', handle_play)
+app.router.add_get("/", index)
+app.router.add_get("/status", status)
+app.router.add_post("/send_otp", send_otp)
+app.router.add_post("/verify", verify)
+app.router.add_post("/react", react_handler)
 
-async def start():
+async def main():
     await load_sessions()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -167,4 +226,4 @@ async def start():
         await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    asyncio.run(start())
+    asyncio.run(main())
