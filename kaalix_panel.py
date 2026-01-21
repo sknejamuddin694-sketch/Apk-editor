@@ -1,129 +1,170 @@
-import os
-import threading
-import whisper
-import openai
-from flask import Flask, request, send_file, render_template_string
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
-from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_audioclips
+#!/usr/bin/env python3
+import asyncio, os, random, re, json, subprocess
+from aiohttp import web
+from telethon import TelegramClient, errors
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.types import ReactionEmoji
+from pytgcalls import PyTgCalls
+from pytgcalls.types.input_stream import AudioPiped
+from pytgcalls.types.input_stream.quality import HighQualityAudio
+import yt_dlp
 
-WORKDIR = "work"
-os.makedirs(WORKDIR, exist_ok=True)
+# ---------------- CONFIG ----------------
+HOST = "127.0.0.1"
+PORT = 8080
+SESSIONS = "sessions"
+os.makedirs(SESSIONS, exist_ok=True)
 
-whisper_model = whisper.load_model("base")
+clients = {}
+vc_clients = {}
 
-BOT_APP = None
-BOT_RUNNING = False
+# ---------------------------------------
 
-# ================= VOICE DECISION =================
-def decide_voice(jp_text):
-    male_words = ["俺", "僕", "だぞ", "だろ", "くそ"]
-    female_words = ["私", "あたし", "よね", "わ", "かしら"]
-    for w in male_words:
-        if w in jp_text:
-            return "male"
-    for w in female_words:
-        if w in jp_text:
-            return "female"
-    return "female"
+def parse_link(link):
+    try:
+        if "t.me/c/" in link:
+            m = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+            return int("-100" + m.group(1)), int(m.group(2))
+        else:
+            m = re.search(r"t\.me/([^/]+)/(\d+)", link)
+            return m.group(1), int(m.group(2))
+    except:
+        return None, None
 
-# ================= CORE DUB =================
-def process_video(input_video, output_video):
-    video = VideoFileClip(input_video)
-    jp_audio = f"{WORKDIR}/jp.wav"
-    video.audio.write_audiofile(jp_audio, logger=None)
+async def load_sessions():
+    for f in os.listdir(SESSIONS):
+        if f.endswith(".session"):
+            phone = f.replace(".session","")
+            client = TelegramClient(os.path.join(SESSIONS, phone), 2040, "b18441a1ff76510619e3c197d826dd45")
+            await client.connect()
+            if await client.is_user_authorized():
+                clients[phone] = client
+                vc_clients[phone] = PyTgCalls(client)
+                await vc_clients[phone].start()
+                print(f"✅ Restored: {phone}")
 
-    result = whisper_model.transcribe(jp_audio, language="ja")
-    segments = result["segments"]
+# ---------------- YT AUDIO ----------------
+def download_audio(url):
+    ydl_opts = {
+        "format": "bestaudio",
+        "outtmpl": "music.%(ext)s",
+        "quiet": True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    for f in os.listdir():
+        if f.startswith("music."):
+            return f
+    return None
 
-    clips = []
-    for i, seg in enumerate(segments):
-        jp_line = seg["text"].strip()
-        if not jp_line:
-            continue
+# ---------------- ROUTES ----------------
 
-        tr = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Translate Japanese anime dialogue into simple spoken Hindi"},
-                {"role": "user", "content": jp_line}
-            ]
-        )
-        hi_text = tr.choices[0].message.content
-        voice = decide_voice(jp_line)
+async def handle_index(request):
+    return web.Response(text="Panel Running", content_type="text/html")
 
-        speech = openai.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice=voice,
-            input=hi_text
-        )
+async def handle_status(request):
+    return web.json_response({"accounts": len(clients)})
 
-        part = f"{WORKDIR}/p{i}.wav"
-        with open(part, "wb") as f:
-            f.write(speech)
-        clips.append(AudioFileClip(part))
+async def handle_send_otp(request):
+    data = await request.json()
+    phone = data['phone'].replace("+","")
+    client = TelegramClient(os.path.join(SESSIONS, phone), int(data['api_id']), data['api_hash'])
+    await client.connect()
+    await client.send_code_request(data['phone'])
+    clients[phone] = client
+    vc_clients[phone] = PyTgCalls(client)
+    await vc_clients[phone].start()
+    return web.json_response({"message": "OTP Sent"})
 
-    final_audio = concatenate_audioclips(clips)
-    final_video = video.set_audio(final_audio)
-    final_video.write_videofile(output_video, logger=None)
+async def handle_verify(request):
+    data = await request.json()
+    client = clients.get(data['phone'].replace("+",""))
+    try:
+        await client.sign_in(data['phone'], data['otp'])
+    except errors.SessionPasswordNeededError:
+        await client.sign_in(password=data['password'])
+    return web.json_response({"message": "Login Success"})
 
-# ================= TELEGRAM BOT =================
-async def tg_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 Hindi dub shuru… wait karo ⏳")
-    file = await update.message.video.get_file()
-    inp = f"{WORKDIR}/tg_input.mp4"
-    out = f"{WORKDIR}/tg_output.mp4"
-    await file.download_to_drive(inp)
-    process_video(inp, out)
-    await update.message.reply_video(video=open(out, "rb"))
+# ---------- FIXED MASS REACTION ----------
+async def handle_react(request):
+    data = await request.json()
+    peer, msg_id = parse_link(data['link'])
+    if not peer:
+        return web.json_response({"error": "Invalid link"}, status=400)
 
-def start_bot(token):
-    global BOT_APP, BOT_RUNNING
-    if BOT_RUNNING:
-        return
-    BOT_RUNNING = True
-    BOT_APP = ApplicationBuilder().token(token).build()
-    BOT_APP.add_handler(MessageHandler(filters.VIDEO, tg_video))
-    BOT_APP.run_polling()
+    success = 0
 
-# ================= HTML =================
-app = Flask(__name__)
+    for phone, client in clients.items():
+        try:
+            if not client.is_connected():
+                await client.connect()
 
-HTML = """
-<h2>Anime Hindi Dub Control Panel</h2>
-<form method="post">
-OpenAI API Key:<br>
-<input name="openai" required><br><br>
-Telegram Bot Token:<br>
-<input name="bot" required><br><br>
-<button>START BOT</button>
-</form>
-<hr>
-<h3>Web Upload (Bot must be running)</h3>
-<form method=post enctype=multipart/form-data action="/upload">
-<input type=file name=video required>
-<button>Dub Video</button>
-</form>
-"""
+            entity = await client.get_entity(peer)
 
-@app.route("/", methods=["GET","POST"])
-def index():
-    if request.method == "POST":
-        openai.api_key = request.form["openai"]
-        bot_token = request.form["bot"]
-        threading.Thread(target=start_bot, args=(bot_token,)).start()
-        return "<h3>✅ Bot Started. Now send video on Telegram OR upload below.</h3>"
-    return render_template_string(HTML)
+            try:
+                await client(JoinChannelRequest(entity))
+            except:
+                pass
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    f = request.files["video"]
-    inp = f"{WORKDIR}/web_input.mp4"
-    out = f"{WORKDIR}/web_output.mp4"
-    f.save(inp)
-    process_video(inp, out)
-    return send_file(out, as_attachment=True)
+            await client(SendReactionRequest(
+                peer=entity,
+                msg_id=msg_id,
+                reaction=[ReactionEmoji(emoticon=data['emoji'])]
+            ))
 
-# ================= RUN =================
+            success += 1
+            await asyncio.sleep(random.uniform(1,2))
+
+        except errors.FloodWaitError as e:
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            print("Reaction error:", e)
+
+    return web.json_response({"message": f"Reaction done by {success} accounts"})
+
+# ---------- VC JOIN + MUSIC ----------
+async def handle_play(request):
+    data = await request.json()
+    chat = data['chat']
+    url = data['url']
+
+    audio = download_audio(url)
+    if not audio:
+        return web.json_response({"error": "Download failed"}, status=400)
+
+    joined = 0
+    for phone, vc in vc_clients.items():
+        try:
+            await vc.join_group_call(
+                chat,
+                AudioPiped(audio, HighQualityAudio())
+            )
+            joined += 1
+            break
+        except Exception as e:
+            print("VC error:", e)
+
+    return web.json_response({"message": f"Music playing in VC ({joined} client)"})
+
+# ---------------- SERVER ----------------
+app = web.Application()
+app.router.add_get('/', handle_index)
+app.router.add_get('/status', handle_status)
+app.router.add_post('/send_otp', handle_send_otp)
+app.router.add_post('/verify', handle_verify)
+app.router.add_post('/react', handle_react)
+app.router.add_post('/play', handle_play)
+
+async def start():
+    await load_sessions()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, HOST, PORT)
+    await site.start()
+    print(f"🚀 Panel running at http://{HOST}:{PORT}")
+    while True:
+        await asyncio.sleep(3600)
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    asyncio.run(start())
