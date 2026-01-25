@@ -1,4 +1,0 @@
-flask
-telethon
-openai
-tgcrypto
